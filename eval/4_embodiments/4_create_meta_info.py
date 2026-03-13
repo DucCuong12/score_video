@@ -2,48 +2,70 @@ import json
 import os
 import argparse
     
-def create_new_json(json_data, video_folder):
-
-    new_json_data = []
-    for item in json_data:
-        index = item["name"]
-        new_item = {
-            "index": index,
-            "prompt": item["prompt"],
-            "robotic_manipulator": item["robotic manipulator"],
-            "manipulated_object": item["manipulated object"]
+def create_meta_info_from_videos_and_prompt(video_folder, prompt_data):
+    """
+    Tạo meta info từ folder video + 1 prompt chung
+    
+    Args:
+        video_folder: đường dẫn folder chứa video
+        prompt_data: 1 object prompt (hoặc list với 1 phần tử)
+    
+    Returns:
+        list của meta_info entries
+    """
+    # Nếu prompt_data là list, lấy phần tử đầu tiên
+    if isinstance(prompt_data, list):
+        prompt = prompt_data[0]
+    else:
+        prompt = prompt_data
+    
+    meta_infos = []
+    video_files = sorted([f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))])
+    
+    for idx, video_file in enumerate(video_files):
+        video_path = os.path.join(video_folder, video_file)
+        
+        meta_info = {
+            "index": idx + 1,
+            "video_name": os.path.splitext(video_file)[0],
+            "prompt": prompt.get("prompt", ""),
+            "robotic_manipulator": prompt.get("robotic manipulator", ""),
+            "manipulated_object": prompt.get("manipulated object", ""),
+            "filepath": os.path.abspath(video_path)
         }
-        video_filename = f"{index}.mp4"
-        video_path = os.path.join(video_folder, video_filename)
-        if os.path.exists(video_path):
-            new_item['filepath'] = os.path.abspath(video_path)
-            new_json_data.append(new_item)
-    return new_json_data
+        meta_infos.append(meta_info)
+    
+    return meta_infos
 
 def main():
-    parser = argparse.ArgumentParser(description="Create new JSON with filepath for existing videos")
-    parser.add_argument("-i", "--input_json", default="./prompts/prompts.json", help="Path to the input JSON file")
-    parser.add_argument("-v", "--video_folder", required=True, help="Path to the folder containing video files")
-    parser.add_argument("-o", "--output_json", required=True, help="Path to save the new JSON file")
+    parser = argparse.ArgumentParser(description="Create meta info JSON từ folder video + 1 prompt chung")
+    parser.add_argument("-v", "--video_folder", required=True, help="Đường dẫn folder chứa video")
+    parser.add_argument("-p", "--prompt_file", required=True, help="Đường dẫn file prompt JSON (chỉ cần 1 prompt)")
+    parser.add_argument("-o", "--output_json", required=True, help="Đường dẫn lưu meta_info.json")
     
     args = parser.parse_args()
 
     video_folder = os.path.abspath(args.video_folder)
 
-    # Read the input JSON file
-    with open(args.input_json, 'r') as f:
-        json_data = json.load(f)
+    # Đọc prompt file
+    with open(args.prompt_file, 'r', encoding='utf-8') as f:
+        prompt_data = json.load(f)
 
-    # Create new JSON data for existing videos
-    new_json_data = create_new_json(json_data, video_folder)
+    # Tạo meta info cho tất cả video
+    meta_infos = create_meta_info_from_videos_and_prompt(video_folder, prompt_data)
 
-    os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
+    # Tạo thư mục output nếu cần
+    output_dir = os.path.dirname(args.output_json)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
 
-    # Write the new JSON to the output file
-    with open(args.output_json, 'w') as f:
-        json.dump(new_json_data, f, indent=2)
+    # Lưu meta info JSON
+    with open(args.output_json, 'w', encoding='utf-8') as f:
+        json.dump(meta_infos, f, indent=2, ensure_ascii=False)
 
-    print(f"New JSON with {len(new_json_data)} entries saved to {args.output_json}")
+    print(f"✅ Tạo meta_info cho {len(meta_infos)} video, lưu vào: {args.output_json}")
+    for meta in meta_infos:
+        print(f"   - {meta['video_name']}: {meta['prompt']}")
 
 if __name__ == "__main__":
     main()

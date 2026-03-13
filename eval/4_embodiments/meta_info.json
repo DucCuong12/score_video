@@ -1,0 +1,18 @@
+[
+  {
+    "index": 1,
+    "video_name": "final_complete",
+    "prompt": "robot picks up bottle to box",
+    "robotic_manipulator": "robotic hand",
+    "manipulated_object": "bottle",
+    "filepath": "/home/cuongvd6/cuongtn/research_score/ReVidgen/eval/4_embodiments/video_task1/final_complete.mp4"
+  },
+  {
+    "index": 2,
+    "video_name": "test2",
+    "prompt": "robot picks up bottle to box",
+    "robotic_manipulator": "robotic hand",
+    "manipulated_object": "bottle",
+    "filepath": "/home/cuongvd6/cuongtn/research_score/ReVidgen/eval/4_embodiments/video_task1/test2.mp4"
+  }
+]

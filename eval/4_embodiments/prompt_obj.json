@@ -1,0 +1,9 @@
+[
+{
+  "name":"task1",
+  "robotic manipulator": "robotic hand",  
+  "manipulated object": "bottle",              
+  "prompt": "robot picks up bottle to box"
+}
+  
+]

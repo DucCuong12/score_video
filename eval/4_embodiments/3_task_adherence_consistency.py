@@ -7,13 +7,16 @@ import csv
 import numpy as np
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
-from openai import OpenAI
-
+from openai import OpenAI, AzureOpenAI
+from dotenv import load_dotenv
 
 def create_llm_client(model_name, api_key):
     if model_name.lower() == "gpt":
-        return OpenAI(api_key=api_key
-        ), "gpt-5-2025-08-07"
+        return AzureOpenAI(
+            api_key = os.getenv("AZURE_OPENAI_API_KEY"),
+            azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_version="2024-02-15-preview"
+        ), "gpt-4.1"
 
     elif model_name.lower() == "qwen":
         return OpenAI(
@@ -133,8 +136,18 @@ class Video_preprocess():
             vid_id = v.split(".")[0]
             vid_path = os.path.join(video_path,v)
             frames = self.extract_frames(vid_path)
-            frame_indices = np.linspace(0, len(frames) - 1, num_image, dtype=int) #take 6 from 16 evenly, 1st & last included
-            grid = [frames[i] for i in frame_indices]
+            if len(frames) < 2:
+                print(f"⚠️ Video {vid_path} có quá ít frames ({len(frames)}), skipping...")
+                continue
+            # Nếu frames ít hơn num_image, điều chỉnh
+            if len(frames) <= num_image:
+                frame_indices = np.arange(len(frames))
+                # Pad với indices cuối cùng
+                while len(frame_indices) < num_image:
+                    frame_indices = np.append(frame_indices, frame_indices[-1])
+            else:
+                frame_indices = np.linspace(0, len(frames) - 1, num_image, dtype=int) #take 6 from 16 evenly, 1st & last included
+            grid = [frames[int(i)] for i in frame_indices]
             grid_image = self.merge_grid(grid)
             grid_filename = os.path.join(output_path, f'{vid_id}.jpeg')
             cv2.imwrite(grid_filename, grid_image)
@@ -184,13 +197,12 @@ def save_results_to_csv(results, output_csv):
             })
 
 def process_single_image(args_tuple):
-    grid_image_name, image_grid_path, prompts, api_key = args_tuple
+    grid_image_name, image_grid_path, prompt_info, api_key = args_tuple
 
     client, real_model_name = create_llm_client(args.model, api_key)
 
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        # prompt_info đã là object prompt, không cần lấy từ danh sách
         full_prompt = prompt_info["prompt"]
         image_path = os.path.join(image_grid_path, grid_image_name)
         img_base64 = encode_image(image_path)
@@ -220,7 +232,7 @@ def process_single_image(args_tuple):
             cleaned_output = {"score": -1, "reason": raw_output}
 
         return {
-            'name': prompt_info["name"],
+            'name': prompt_info.get("name", grid_image_name.replace(".jpeg", "").replace(".jpg", "")),
             'prompt': prompt_info["prompt"],
             'response': cleaned_output
         }
@@ -239,9 +251,12 @@ def main():
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
 
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
+    # Lọc tất cả file .jpeg (hoặc .jpg) thay vì chỉ file bắt đầu bằng số
+    grid_images = sorted([f for f in os.listdir(image_grid_path) if f.endswith(('.jpeg', '.jpg'))])
+    print(f"Found {len(grid_images)} grid images: {grid_images}")
 
-    task_args = [(img, image_grid_path, prompts, args.api_key) for img in grid_images]
+    # Truyền prompts[0] (prompt duy nhất) cho tất cả task
+    task_args = [(img, image_grid_path, prompts[0], args.api_key) for img in grid_images]
 
     with Pool(processes=args.num_workers) as pool:
         results = list(tqdm(pool.imap(process_single_image, task_args), total=len(task_args)))
@@ -251,6 +266,7 @@ def main():
     save_results_to_csv(results, output_csv)
 
 if __name__ == "__main__":
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--video_path", required=True, type=str, help="视频文件夹路径")
     parser.add_argument("--image_grid_path", type=str, help="图像网格文件夹路径")

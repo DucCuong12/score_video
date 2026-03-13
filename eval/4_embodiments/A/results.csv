@@ -1,0 +1,3 @@
+name,score,prompt,reason
+,5,robot picks up a bottle to box,"The robot successfully grasps the bottle with both hands, lifts it, and places it into the box. Each step of the task is clearly shown in the sequence without any evident errors or drops. The bottle ends up inside the box, making the task completion appear perfect."
+,5,robot picks up a bottle to box,"The robot clearly picks up the bottle and places it into the box without any visible errors or hesitation. All frames sequentially show the correct actions, ending with the bottle inside the box, perfectly matching the task description."

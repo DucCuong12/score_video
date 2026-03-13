@@ -4,30 +4,37 @@ import sys
 import math
 from tqdm import tqdm
 
+# ===== Setup Python paths FIRST before any other imports =====
+# Get the current script directory and the pkgs folder
+script_dir = os.path.dirname(os.path.abspath(__file__))
+pkgs_root = os.path.join(script_dir, "pkgs")
+project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+
+grounding_dino_path = os.path.join(pkgs_root, "Grounded-Segment-Anything", "GroundingDINO")
+sys.path.insert(0, grounding_dino_path)
+sys.path.insert(0, os.path.join(pkgs_root, "Grounded-Segment-Anything", "segment_anything"))
+sys.path.insert(0, os.path.join(pkgs_root, "co-tracker"))
+sys.path.insert(0, os.path.join(pkgs_root, "sam2"))
+
+print(f"[DEBUG] Script dir: {script_dir}")
+print(f"[DEBUG] Project root: {project_root}")
+print(f"[DEBUG] GroundingDINO path: {grounding_dino_path}")
+print(f"[DEBUG] sys.path[0:3]: {sys.path[0:3]}")
+
 import numpy as np
 import json
 import torch
 from PIL import Image
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
-
-
 from PIL import ImageDraw, ImageFont
 from matplotlib import colormaps
 
-sys.path.append(os.path.join(os.getcwd(), "pkgs", "Grounded-Segment-Anything"))
-sys.path.append(os.path.join(os.getcwd(), "pkgs", "Grounded-Segment-Anything", "GroundingDINO"))
-sys.path.append(os.path.join(os.getcwd(), "pkgs", "Grounded-Segment-Anything", "segment_anything"))
-sys.path.append(os.path.join(os.getcwd(), "pkgs", "co-tracker"))
-sys.path.append(os.path.join(os.getcwd(), "pkgs", "sam2"))
-
 # Grounding DINO
-import GroundingDINO.groundingdino.datasets.transforms as T
-from GroundingDINO.groundingdino.models import build_model
-from GroundingDINO.groundingdino.util.slconfig import SLConfig
-from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
-
+import groundingdino.datasets.transforms as T
+from groundingdino.models import build_model
+from groundingdino.util.slconfig import SLConfig
+from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
 # segment anything
 from sam2.build_sam import build_sam2
@@ -77,7 +84,15 @@ def load_video(video_path):
 def load_model(model_config_path, model_checkpoint_path, bert_base_uncased_path, device):
     args = SLConfig.fromfile(model_config_path)
     args.device = device
+
+    # If a local BERT path is provided but does not exist, fallback to HF model ID.
+    looks_like_local_path = any(sep in bert_base_uncased_path for sep in ["/", "\\"]) or bert_base_uncased_path.startswith(".")
+    if looks_like_local_path and not os.path.exists(bert_base_uncased_path):
+        print(f"[WARN] Invalid local BERT path: {bert_base_uncased_path}. Fallback to 'bert-base-uncased'.")
+        bert_base_uncased_path = "bert-base-uncased"
+
     args.bert_base_uncased_path = bert_base_uncased_path
+    print(f"[DEBUG] Effective BERT path/id: {args.bert_base_uncased_path}")
     model = build_model(args)
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
     load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
@@ -200,15 +215,45 @@ if __name__ == "__main__":
     parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
     parser.add_argument("--grid_size", type=int, default=30, help="Regular grid size")
     parser.add_argument("--device", type=str, default="cuda", help="running on cpu only!, default=False")
+    parser.add_argument(
+        "--bert_model",
+        type=str,
+        default="bert-base-uncased",
+        help="Local path or HuggingFace model ID for BERT backbone",
+    )
     args = parser.parse_args()
 
     # model cfg
-    config_file = "pkgs/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinB.py"
-    grounded_checkpoint = "checkpoints/GroundingDino/groundingdino_swinb_cogcoor.pth"
-    bert_base_uncased_path = "checkpoints/BERT/google-bert/bert-base-uncased"
-    sam_checkpoint = "./checkpoints/SAM/sam2.1_hiera_large.pt"
+    config_file = os.path.join(
+        script_dir,
+        "pkgs",
+        "Grounded-Segment-Anything",
+        "GroundingDINO",
+        "groundingdino",
+        "config",
+        "GroundingDINO_SwinB.py",
+    )
+    checkpoints_root = os.path.join(project_root, "checkpoints")
+    grounded_checkpoint = os.path.join(checkpoints_root, "GroundingDino", "groundingdino_swinb_cogcoor.pth")
+    bert_base_uncased_path = args.bert_model
+    sam_checkpoint = os.path.join(checkpoints_root, "SAM", "sam2.1_hiera_large.pt")
     sam_model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-    cotracker_checkpoint = "checkpoints/Cotracker/scaled_offline.pth"
+    cotracker_checkpoint = os.path.join(checkpoints_root, "Cotracker", "scaled_offline.pth")
+
+    required_paths = [
+        ("GroundingDINO config", config_file),
+        ("GroundingDINO checkpoint", grounded_checkpoint),
+        ("SAM checkpoint", sam_checkpoint),
+        ("CoTracker checkpoint", cotracker_checkpoint),
+    ]
+    missing_paths = [(name, path) for name, path in required_paths if not os.path.exists(path)]
+    if missing_paths:
+        missing_msg = "\n".join([f"- {name}: {path}" for name, path in missing_paths])
+        raise FileNotFoundError(
+            "Missing required files:\n"
+            f"{missing_msg}\n"
+            "Please download checkpoints as documented in README.md under ReVidgen/checkpoints/."
+        )
 
     meta_info_path = args.meta_info_path
     text_prompt = args.text_prompt
@@ -230,6 +275,7 @@ if __name__ == "__main__":
         offline=True,
         window_len=60,
     ).to(device)
+    cotracker_device = device
 
     # load meta info json
     with open(args.meta_info_path, 'r') as f:
@@ -239,7 +285,23 @@ if __name__ == "__main__":
     os.makedirs(visualization_dir, exist_ok=True)
 
     for meta_info in tqdm(meta_infos, desc="Motion Degree: Grounded SAM Segmentation"):
-        image_pil, image, image_array, video = load_video(meta_info['filepath'])
+        if 'filepath' not in meta_info or not os.path.exists(meta_info['filepath']):
+            print(f"⚠️  Video không tồn tại: {meta_info.get('filepath', 'N/A')}, skipping...")
+            metric_name = f'perceptible_amplitude_{args.target_type}'
+            meta_info[metric_name] = None
+            with open(args.meta_info_path, 'w') as f:
+                json.dump(meta_infos, f, indent=4)
+            continue
+        
+        try:
+            image_pil, image, image_array, video = load_video(meta_info['filepath'])
+        except Exception as e:
+            print(f"⚠️  Lỗi đọc video {meta_info.get('filepath', 'N/A')}: {str(e)}, skipping...")
+            metric_name = f'perceptible_amplitude_{args.target_type}'
+            meta_info[metric_name] = None
+            with open(args.meta_info_path, 'w') as f:
+                json.dump(meta_infos, f, indent=4)
+            continue
 
         text_prompt = meta_info[args.target_type] + '.' # robotic_manipulator / manipulated_object
         if text_prompt.lower() == "none.":
@@ -296,22 +358,42 @@ if __name__ == "__main__":
         # load the input video frame by frame
         video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
         video_width, video_height = video.shape[-1], video.shape[-2]
-        video = video.to(device)
 
         if boxes_filt.shape[0] != 0:
             background_mask = torch.any(~mask, dim=0).to(torch.uint8) * 255
         else:
-            background_mask = torch.ones((1, video_height, video_width), dtype=torch.uint8, device=device) * 255
+            background_mask = torch.ones((1, video_height, video_width), dtype=torch.uint8) * 255
         
         # eval background (camera) motion degree
         background_mask = background_mask.unsqueeze(0)
-        pred_tracks, pred_visibility = cotracker_model(
-            video,
-            grid_size=grid_size,
-            grid_query_frame=0,
-            backward_tracking=True,
-            segm_mask=background_mask
-        )
+        try:
+            pred_tracks, pred_visibility = cotracker_model(
+                video.to(cotracker_device),
+                grid_size=grid_size,
+                grid_query_frame=0,
+                backward_tracking=True,
+                segm_mask=background_mask.to(cotracker_device),
+            )
+        except torch.OutOfMemoryError:
+            if cotracker_device == "cuda":
+                print("[WARN] CoTracker CUDA OOM, fallback to CPU for tracking.")
+                torch.cuda.empty_cache()
+                cotracker_model = CoTrackerPredictor(
+                    checkpoint=cotracker_checkpoint,
+                    v2=False,
+                    offline=True,
+                    window_len=60,
+                ).to("cpu")
+                cotracker_device = "cpu"
+                pred_tracks, pred_visibility = cotracker_model(
+                    video,
+                    grid_size=grid_size,
+                    grid_query_frame=0,
+                    backward_tracking=True,
+                    segm_mask=background_mask,
+                )
+            else:
+                raise
         
         background_motion_degree = calculate_motion_degree(pred_tracks, video_width, video_height).item()
         # meta_info['motion_amplitude']['camera'] = background_motion_degree.item()
@@ -321,13 +403,34 @@ if __name__ == "__main__":
             subject_mask = torch.any(mask, dim=0).to(torch.uint8) * 255
             # eval subject motion degree
             subject_mask = subject_mask.unsqueeze(0)
-            pred_tracks, pred_visibility = cotracker_model(
-                video,
-                grid_size=grid_size,
-                grid_query_frame=0,
-                backward_tracking=True,
-                segm_mask=subject_mask
-            )
+            try:
+                pred_tracks, pred_visibility = cotracker_model(
+                    video.to(cotracker_device),
+                    grid_size=grid_size,
+                    grid_query_frame=0,
+                    backward_tracking=True,
+                    segm_mask=subject_mask.to(cotracker_device),
+                )
+            except torch.OutOfMemoryError:
+                if cotracker_device == "cuda":
+                    print("[WARN] CoTracker CUDA OOM, fallback to CPU for tracking.")
+                    torch.cuda.empty_cache()
+                    cotracker_model = CoTrackerPredictor(
+                        checkpoint=cotracker_checkpoint,
+                        v2=False,
+                        offline=True,
+                        window_len=60,
+                    ).to("cpu")
+                    cotracker_device = "cpu"
+                    pred_tracks, pred_visibility = cotracker_model(
+                        video,
+                        grid_size=grid_size,
+                        grid_query_frame=0,
+                        backward_tracking=True,
+                        segm_mask=subject_mask,
+                    )
+                else:
+                    raise
             
             subject_motion_degree = calculate_motion_degree(pred_tracks, video_width, video_height).item()
             # subject_motion_degree = subject_motion_degree.item()

@@ -134,11 +134,26 @@ if __name__ == "__main__":
     
     # Iterate over videos for Q-Align scoring
     for meta_info in tqdm(meta_infos, desc="Q-Align Scoring"):
-        # Get video filepath
-        video_file = meta_info["filepath"]
-        # Get video scores
-        _, _, scores = scorer(load_video_sliding_window(video_file, args.window_size))
-        scores = scores.tolist()
+        # Kiểm tra video file
+        if 'filepath' not in meta_info or not os.path.exists(meta_info['filepath']):
+            print(f"⚠️  Video không tồn tại: {meta_info.get('filepath', 'N/A')}, skipping...")
+            meta_info["motion_smoothness_score"] = None
+            with open(args.meta_info_path, 'w') as f:
+                json.dump(meta_infos, f, indent=2)
+            continue
+        
+        try:
+            # Get video filepath
+            video_file = meta_info["filepath"]
+            # Get video scores
+            _, _, scores = scorer(load_video_sliding_window(video_file, args.window_size))
+            scores = scores.tolist()
+        except Exception as e:
+            print(f"⚠️  Lỗi process video {meta_info.get('filepath', 'N/A')}: {str(e)}, skipping...")
+            meta_info["motion_smoothness_score"] = None
+            with open(args.meta_info_path, 'w') as f:
+                json.dump(meta_infos, f, indent=2)
+            continue
         # Set score fluctuation threshold based on video motion amplitude
         threshold = set_threshold(meta_info['perceptible_amplitude_robotic_manipulator'])
         # Get frames with issues based on score and threshold

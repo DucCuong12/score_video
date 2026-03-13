@@ -1,0 +1,9 @@
+.env
+checkpoints/
+eval/4_embodiments/checkpoints/
+eval/4_embodiments/pkgs/*/checkpoints/
+eval/4_embodiments/pkgs/*/gdino_checkpoints/
+eval/4_embodiments/pkgs/*/BERT/
+eval/4_embodiments/pkgs/sam2/checkpoints/
+eval/4_embodiments/pkgs/Grounded-SAM-2/checkpoints/
+eval/4_embodiments/pkgs/Grounded-SAM-2/gdino_checkpoints/

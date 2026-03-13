@@ -4,18 +4,23 @@ import json
 import base64
 import argparse
 import csv
+from dotenv import load_dotenv
 import numpy as np
 import re
 import warnings
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 import time, random
+
 
 def create_llm_client(model_name, api_key):
     if model_name.lower() == "gpt":
-        return OpenAI(api_key=api_key
-        ), "gpt-5-2025-08-07"
+        return AzureOpenAI(
+            api_key = os.getenv("AZURE_OPENAI_API_KEY"),
+            azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_version="2024-02-15-preview"
+        ), "gpt-4.1"
 
     elif model_name.lower() == "qwen":
         return OpenAI(
@@ -34,7 +39,7 @@ class Video_preprocess():
         """
         修改：只取两帧
         - 第一帧 (index=0)
-        - 75% 处的帧 (index=int(0.75 * total_frames))
+        - 85% 处的帧 (index=int(0.9 * total_frames))
         """
         frames = []
         cap = cv2.VideoCapture(video_path)
@@ -45,7 +50,7 @@ class Video_preprocess():
             return frames
 
         # 确定目标帧索引
-        frame_indices = [0, int(0.75 * (total_frames - 1))] if total_frames > 1 else [0]
+        frame_indices = [0, int(0.9 * (total_frames - 1))] if total_frames > 1 else [0]
         target_set = set(frame_indices)
 
         current_index = 0
@@ -223,13 +228,12 @@ def score_mapping(opt_str):
     return mapping.get(keys, "bad reply")
 
 def process_single_image(args_tuple):
-    grid_image_name, image_grid_path, prompts, api_key = args_tuple
+    grid_image_name, image_grid_path, prompt_info, api_key, image_index = args_tuple
 
     client, real_model_name = create_llm_client(args.model, api_key)
 
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        # prompt_info đã là object prompt, không cần lấy từ danh sách
         phrase_1 = prompt_info["robotic manipulator"]
         phrase_2 = prompt_info["manipulated object"]
         full_prompt = prompt_info["prompt"]
@@ -354,6 +358,8 @@ Put the option in JSON format with the following keys: option (e.g., A), explana
 
 
 def main():
+    load_dotenv()
+
     with open(args.read_prompt_file, 'r') as f:
         prompts = json.load(f)
 
@@ -362,9 +368,9 @@ def main():
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
 
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
-
-    task_args = [(img, image_grid_path, prompts, args.api_key) for img in grid_images]
+    grid_images = sorted([f for f in os.listdir(image_grid_path) if f.endswith(('.jpeg', '.jpg'))])
+    print(f"Total {len(grid_images)} grid images to process in {image_grid_path}")
+    task_args = [(img, image_grid_path, prompts[0], args.api_key, idx) for idx, img in enumerate(grid_images)]
 
     with Pool(processes=args.num_workers) as pool:
         results = list(tqdm(pool.imap(process_single_image, task_args), total=len(task_args)))
