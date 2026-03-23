@@ -4,11 +4,46 @@ import json
 import base64
 import argparse
 import csv
+from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
+
+
+def create_llm_client(model_name, api_key=None):
+    if model_name.lower() == "gpt":
+        azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        if azure_api_key and azure_endpoint:
+            return AzureOpenAI(
+                api_key=azure_api_key,
+                azure_endpoint=azure_endpoint,
+                api_version="2024-02-15-preview",
+            ), "DeepSeek-V3.2"
+
+        openai_key = api_key or os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            return OpenAI(api_key=openai_key), "gpt-5-2025-08-07"
+
+        raise ValueError(
+            "Missing GPT credentials. Set AZURE_OPENAI_API_KEY/AZURE_OPENAI_ENDPOINT or OPENAI_API_KEY/--api_key."
+        )
+
+    if model_name.lower() == "qwen":
+        qwen_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
+        if not qwen_key:
+            raise ValueError(
+                "Missing Qwen API key. Set --api_key or DASHSCOPE_API_KEY/QWEN_API_KEY in env."
+            )
+        return OpenAI(
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key=qwen_key,
+        ), "qwen3-vl-235b-a22b-instruct"
+
+    raise ValueError("Unsupported --model, choose from: gpt, qwen")
+
 class Video_preprocess():
     def __init__(self):
         pass
@@ -68,26 +103,42 @@ class Video_preprocess():
         grid = np.concatenate(row_images, axis=0)
         return grid
     def read_video_path(self, video_path):
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
         if os.path.isdir(video_path):  # if video_path is a list of videos
-            video = os.listdir(video_path)
+            video = [
+                v for v in os.listdir(video_path)
+                if os.path.isfile(os.path.join(video_path, v))
+                and os.path.splitext(v.lower())[1] in video_exts
+            ]
         elif os.path.isfile(video_path):  # else if video_path is a single video
             video = [os.path.basename(video_path)]
             video_path = os.path.dirname(video_path)
+        else:
+            raise FileNotFoundError(f"Invalid --video_path: {video_path}")
         video.sort()
+        if not video:
+            raise ValueError(
+                f"No supported video files found in: {video_path}. "
+                "Expected extensions: .mp4, .avi, .mov, .mkv, .webm, .m4v"
+            )
         return video, video_path
          
 
     def convert_video_to_grid(self, video_path,num_image=6):
+        base_output_dir = video_path if os.path.isdir(video_path) else os.path.dirname(video_path)
         video, video_path = self.read_video_path(video_path)
         print(f"start converting video to image grid with {num_image} frames from path:", video_path)
     
-        output_path = os.path.join(os.path.dirname(video_path), f"image_grid_{num_image}frame")
+        output_path = os.path.join(base_output_dir, f"image_grid_{num_image}frame")
         os.makedirs(output_path, exist_ok=True)
     
         for v in video:
             vid_id = v.split(".")[0]
             vid_path = os.path.join(video_path,v)
             frames = self.extract_frames(vid_path)
+            if len(frames) == 0:
+                print(f"[WARN] Skip '{v}' because no frames could be extracted.")
+                continue
             frame_indices = np.linspace(0, len(frames) - 1, num_image, dtype=int) #take 6 from 16 evenly, 1st & last included
             grid = [frames[i] for i in frame_indices]
             grid_image = self.merge_grid(grid)
@@ -104,6 +155,35 @@ def create_prompt(view: str, description: str, manipulated_object: str, entity1:
     Require strict JSON output.
     """
 
+    entity2_l = str(entity2).lower()
+    passive_keywords = [
+        "box", "bin", "container", "basket", "tray", "table", "shelf", "rack", "target"
+    ]
+    is_passive_target = any(k in entity2_l for k in passive_keywords)
+
+    if is_passive_target:
+        category_a_note = (
+            f"- IMPORTANT: {entity2} is treated as a passive target object. "
+            "Do NOT require it to move or respond actively.\n"
+        )
+        action_effectiveness_rule = (
+            f"- Check whether {entity1} performs a complete and physically plausible manipulation of {manipulated_object} "
+            f"toward/into {entity2}. Focus on trajectory, grasp quality, and placement alignment. "
+            f"Do not penalize simply because {entity2} remains static."
+        )
+        task_completion_rule = (
+            f"- Check whether the task goal is achieved: {entity1} correctly manipulates {manipulated_object} "
+            f"and places/transfers it relative to {entity2}. {entity2} may be passive."
+        )
+    else:
+        category_a_note = ""
+        action_effectiveness_rule = (
+            f"- Check strictly whether every interaction action between {entity1} and {entity2} is successful and complete."
+        )
+        task_completion_rule = (
+            f"- Check whether both {entity1} and {entity2} actively participate in the required sub-steps and perform the correct roles."
+        )
+
     return f"""
 You are shown an image composed of a 3×2 grid of frames arranged in chronological order (read row by row).  
 These frames are extracted from an AI-generated video recorded from the {view} perspective.  
@@ -115,6 +195,12 @@ Manipulated object: {manipulated_object}
 
 Your evaluation goal is: **multi-entity manipulation and interaction performance**.
 
+Hard identity rule (must enforce):
+- If Entity1 is specified as a robot (e.g., robotic hand/arm/manipulator), its visual form must be robotic.
+- If Entity1 appears human-like (human hand/skin/fingers/anatomy) or non-robotic while expected to be robot,
+  assign **action_coordination = 1** and **entity_consistency = 1**.
+- In this case, cooperative quality should be treated as failed even if final placement looks correct.
+
 Please evaluate the video from the following five aspects.  
 Each aspect receives a score from **1 to 5**:
 - If the aspect is judged as "No", assign **1 point**.  
@@ -122,6 +208,7 @@ Each aspect receives a score from **1 to 5**:
 - If any aspect in Category A (Task Performance and Interaction Action) equals 1, the total score = 1.
 - Otherwise, compute the mean of all five scores as the final score.
 - BE STRICT WHEN SCORING — if any issue or imperfection is detected, assign 1 or 2 points decisively.
+{category_a_note}
 
 ---
 
@@ -129,7 +216,8 @@ Each aspect receives a score from **1 to 5**:
 These aspects focus on how well the **two entities cooperate and perform** the described behavior.
 
 1) **Action Effectiveness**  
-   - Check strictly whether every **interaction actions between {entity1} and {entity2}** are successful and complete.  
+    {action_effectiveness_rule}  
+    - If Entity1 robot identity mismatch is detected, this aspect must be 1.
    - Each required interaction must exhibit a complete and well-coordinated behavioral sequence consistent with the task type, demonstrating proper timing and causal response:
     - Contact interactions: approach → contact → release/transfer.
     - Non-contact interactions: initiation → alignment → sustained coordination.
@@ -143,7 +231,7 @@ These aspects focus on how well the **two entities cooperate and perform** the d
 
 2) **Task Completion**  
    - Check whether the task goal described in the prompt is fully achieved.
-   - Check whether both {entity1} and {entity2} actively participate in the required sub-steps and perform the correct roles.
+    {task_completion_rule}
    - BE STRICT WHEN JUDGING WHETHER THE GOAL IS COMPLETED
    - Reference scoring:  
      1 = Task failed or goal not achieved.  
@@ -158,6 +246,8 @@ These aspects focus on how well the **two entities cooperate and perform** the d
 
 3) **Entity Consistency (Robot & Interaction Partner Stability)**  
    - Check whether the {entity1} and {entity2} maintains consistent geometry, articulation, and identity.
+    - Also verify that {entity1} matches its declared identity (robot vs human-like appearance).
+    - If {entity1} is expected to be robotic but appears human-like, this aspect should be 1.
    - Note: Evaluate this aspect by comparing all frames to the first frame.
    - Reference scoring:  
      1 = Clear deformation or identity loss or discontinuity.  
@@ -267,20 +357,73 @@ def save_results_to_csv(results, output_csv):
                 'details': resp
             })
 
+
+def load_prompts(prompt_file_path):
+    with open(prompt_file_path, 'r') as f:
+        raw = json.load(f)
+
+    if isinstance(raw, dict):
+        prompts = [raw]
+    elif isinstance(raw, list):
+        prompts = raw
+    else:
+        raise ValueError("Prompt file must be a JSON object or a JSON array of objects")
+
+    if not prompts:
+        raise ValueError("Prompt file is empty")
+    return prompts
+
+
+def resolve_prompt_info(prompts, grid_image_name):
+    if len(prompts) == 1:
+        return prompts[0]
+
+    image_stem = os.path.splitext(grid_image_name)[0]
+    if image_stem.isdigit():
+        image_index = int(image_stem) - 1
+        if 0 <= image_index < len(prompts):
+            return prompts[image_index]
+
+    for p in prompts:
+        if str(p.get("name", "")) == image_stem:
+            return p
+
+    raise IndexError(
+        f"Cannot map image '{grid_image_name}' to prompt. "
+        "Provide one shared prompt, numeric-indexed prompts, or prompts with matching 'name'."
+    )
+
+
+def get_prompt_fields(prompt_info):
+    view = prompt_info.get("view", "unspecified")
+    description = prompt_info.get("prompt", "")
+    manipulated_object = prompt_info.get("manipulated object", "manipulated object")
+    entity1 = prompt_info.get("entity1", prompt_info.get("robotic manipulator", "entity1"))
+    entity2 = prompt_info.get("entity2", "entity2")
+    return view, description, manipulated_object, entity1, entity2
+
+
+def list_grid_images(image_grid_path):
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    return sorted(
+        [f for f in os.listdir(image_grid_path)
+         if os.path.isfile(os.path.join(image_grid_path, f))
+         and os.path.splitext(f.lower())[1] in image_exts]
+    )
+
 def process_single_image_gpt(args_tuple):
     grid_image_name, prompts, image_grid_path, api_key = args_tuple
-    client = OpenAI(api_key=api_key)
+    client, real_model_name = create_llm_client("gpt", api_key)
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        prompt_info = resolve_prompt_info(prompts, grid_image_name)
+        view, description, manipulated_object, entity1, entity2 = get_prompt_fields(prompt_info)
         image_path = os.path.join(image_grid_path, grid_image_name)
         img_base64 = encode_image(image_path)
 
-        Q = create_prompt(prompt_info["view"], prompt_info["prompt"],
-                          prompt_info["manipulated object"],prompt_info["entity1"],prompt_info["entity2"])
+        Q = create_prompt(view, description, manipulated_object, entity1, entity2)
 
         response = client.chat.completions.create(
-            model="gpt-5-2025-08-07",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -299,8 +442,8 @@ def process_single_image_gpt(args_tuple):
             print("Wrong response format!")
 
         return {
-            'name': prompt_info["name"],
-            'prompt': prompt_info["prompt"],
+            'name': os.path.splitext(grid_image_name)[0],
+            'prompt': description,
             'response': cleaned_output
         }
     except Exception as e:
@@ -308,14 +451,13 @@ def process_single_image_gpt(args_tuple):
                 'response': {'score': -1, 'reason': f'Error: {e}'}}
 
 def run_gpt():
-    with open(args.read_prompt_file, 'r') as f:
-        prompts = json.load(f)
+    prompts = load_prompts(args.read_prompt_file)
 
     image_grid_path = args.image_grid_path
     if image_grid_path is None or not os.path.exists(image_grid_path) or not os.listdir(image_grid_path):
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
+    grid_images = list_grid_images(image_grid_path)
 
     task_args = [(img, prompts, image_grid_path, args.api_key) for img in grid_images]
     with Pool(args.num_workers) as pool:
@@ -327,18 +469,17 @@ def run_gpt():
 
 def process_single_image_qwen(args_tuple):
     grid_image_name, prompts, image_grid_path, api_key = args_tuple
-    client = OpenAI(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", api_key=api_key)
+    client, real_model_name = create_llm_client("qwen", api_key)
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        prompt_info = resolve_prompt_info(prompts, grid_image_name)
+        view, description, manipulated_object, entity1, entity2 = get_prompt_fields(prompt_info)
         image_path = os.path.join(image_grid_path, grid_image_name)
         img_base64 = encode_image(image_path)
 
-        Q = create_prompt(prompt_info["view"], prompt_info["prompt"],
-                          prompt_info["manipulated object"],prompt_info["entity1"],prompt_info["entity2"])
+        Q = create_prompt(view, description, manipulated_object, entity1, entity2)
 
         response = client.chat.completions.create(
-            model="qwen3-vl-235b-a22b-instruct",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -357,8 +498,8 @@ def process_single_image_qwen(args_tuple):
             print("Wrong response format!")
 
         return {
-            'name': prompt_info["name"],
-            'prompt': prompt_info["prompt"],
+            'name': os.path.splitext(grid_image_name)[0],
+            'prompt': description,
             'response': cleaned_output
         }
     except Exception as e:
@@ -366,14 +507,13 @@ def process_single_image_qwen(args_tuple):
                 'response': {'score': -1, 'reason': f'Error: {e}'}}
 
 def run_qwen():
-    with open(args.read_prompt_file, 'r') as f:
-        prompts = json.load(f)
+    prompts = load_prompts(args.read_prompt_file)
 
     image_grid_path = args.image_grid_path
     if image_grid_path is None or not os.path.exists(image_grid_path) or not os.listdir(image_grid_path):
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
+    grid_images = list_grid_images(image_grid_path)
 
     task_args = [(img, prompts, image_grid_path, args.api_key) for img in grid_images]
     with Pool(args.num_workers) as pool:
@@ -385,6 +525,7 @@ def run_qwen():
 
 # =================== 启动入口 ===================
 if __name__ == "__main__":
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--video_path", required=True, type=str)
     parser.add_argument("--image_grid_path", type=str)

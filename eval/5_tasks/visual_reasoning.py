@@ -4,11 +4,46 @@ import json
 import base64
 import argparse
 import csv
+from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
+
+
+def create_llm_client(model_name, api_key=None):
+    if model_name.lower() == "gpt":
+        azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        if azure_api_key and azure_endpoint:
+            return AzureOpenAI(
+                api_key=azure_api_key,
+                azure_endpoint=azure_endpoint,
+                api_version="2024-02-15-preview",
+            ), "gpt-4.1"
+
+        openai_key = api_key or os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            return OpenAI(api_key=openai_key), "gpt-5-2025-08-07"
+
+        raise ValueError(
+            "Missing GPT credentials. Set AZURE_OPENAI_API_KEY/AZURE_OPENAI_ENDPOINT or OPENAI_API_KEY/--api_key."
+        )
+
+    if model_name.lower() == "qwen":
+        qwen_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
+        if not qwen_key:
+            raise ValueError(
+                "Missing Qwen API key. Set --api_key or DASHSCOPE_API_KEY/QWEN_API_KEY in env."
+            )
+        return OpenAI(
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key=qwen_key,
+        ), "qwen3-vl-235b-a22b-instruct"
+
+    raise ValueError("Unsupported --model, choose from: gpt, qwen")
+
 class Video_preprocess():
     def __init__(self):
         pass
@@ -68,26 +103,42 @@ class Video_preprocess():
         grid = np.concatenate(row_images, axis=0)
         return grid
     def read_video_path(self, video_path):
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
         if os.path.isdir(video_path):  # if video_path is a list of videos
-            video = os.listdir(video_path)
+            video = [
+                v for v in os.listdir(video_path)
+                if os.path.isfile(os.path.join(video_path, v))
+                and os.path.splitext(v.lower())[1] in video_exts
+            ]
         elif os.path.isfile(video_path):  # else if video_path is a single video
             video = [os.path.basename(video_path)]
             video_path = os.path.dirname(video_path)
+        else:
+            raise FileNotFoundError(f"Invalid --video_path: {video_path}")
         video.sort()
+        if not video:
+            raise ValueError(
+                f"No supported video files found in: {video_path}. "
+                "Expected extensions: .mp4, .avi, .mov, .mkv, .webm, .m4v"
+            )
         return video, video_path
          
 
     def convert_video_to_grid(self, video_path,num_image=6):
+        base_output_dir = video_path if os.path.isdir(video_path) else os.path.dirname(video_path)
         video, video_path = self.read_video_path(video_path)
         print(f"start converting video to image grid with {num_image} frames from path:", video_path)
     
-        output_path = os.path.join(os.path.dirname(video_path), f"image_grid_{num_image}frame")
+        output_path = os.path.join(base_output_dir, f"image_grid_{num_image}frame")
         os.makedirs(output_path, exist_ok=True)
     
         for v in video:
             vid_id = v.split(".")[0]
             vid_path = os.path.join(video_path,v)
             frames = self.extract_frames(vid_path)
+            if len(frames) == 0:
+                print(f"[WARN] Skip '{v}' because no frames could be extracted.")
+                continue
             frame_indices = np.linspace(0, len(frames) - 1, num_image, dtype=int) #take 6 from 16 evenly, 1st & last included
             grid = [frames[i] for i in frame_indices]
             grid_image = self.merge_grid(grid)
@@ -149,6 +200,12 @@ Manipulated object: {manipulated_object}
 
 Your evaluation focus is: **visual reasoning**.
 
+Hard identity rule (must enforce):
+- The manipulator must visually match the declared robotic type: {robotic_manipulator}.
+- If the manipulator appears human-like (human hand/skin/fingers/anatomy) or non-robotic while the prompt expects a robot,
+  assign **action_execution = 1** and **manipulator_consistency = 1**.
+- In this case, reasoning correctness should be considered unreliable even if outputs look aligned.
+
 Please evaluate the video from the following five aspects.  
 Each aspect receives a score from **1 to 5**:
 - If the aspect is judged as "No", assign **1 point**.  
@@ -163,6 +220,7 @@ Each aspect receives a score from **1 to 5**:
 These aspects focus on how effectively and coherently the robot executes behaviors and whether the visual reasoning process aligns with the described goals.
 1) **Action Effectiveness**  
   - Check whether the robot’s motion is physically reasonable (e.g., proper gripper closure, contact location, trajectory smoothness).  
+    - If robot identity mismatch is detected, this aspect must be 1.
   - Reference scoring:  
     1 = Motion discontinuous, incomplete, or physically implausible.  
     2 = Basically correct and understandable motion.  
@@ -195,7 +253,8 @@ These aspects evaluate whether the visual and physical properties of the robot a
 
 4) **Robotic Manipulator Consistency**  
    - Robotic Manipulator: {robotic_manipulator} 
-   - Check whether the robotic entity, arm or gripper maintains stable geometry and articulation without disconnection or self-intersection.  
+    - Check whether the robotic entity, arm or gripper maintains stable geometry and articulation without disconnection or self-intersection.
+    - Also verify identity fidelity to the declared robotic type; human-like anatomy is a severe mismatch and should be scored as 1.
    - Note: Evaluate this aspect by comparing all frames to the first frame.
    - Reference scoring:  
      1 = Changes in the form, structure, or appearance of the manipulator or its subcomponents; consistency not maintained.  
@@ -290,20 +349,73 @@ def save_results_to_csv(results, output_csv):
                 'details': resp
             })
 
+
+def load_prompts(prompt_file_path):
+    with open(prompt_file_path, 'r') as f:
+        raw = json.load(f)
+
+    if isinstance(raw, dict):
+        prompts = [raw]
+    elif isinstance(raw, list):
+        prompts = raw
+    else:
+        raise ValueError("Prompt file must be a JSON object or a JSON array of objects")
+
+    if not prompts:
+        raise ValueError("Prompt file is empty")
+    return prompts
+
+
+def resolve_prompt_info(prompts, grid_image_name):
+    if len(prompts) == 1:
+        return prompts[0]
+
+    image_stem = os.path.splitext(grid_image_name)[0]
+    if image_stem.isdigit():
+        image_index = int(image_stem) - 1
+        if 0 <= image_index < len(prompts):
+            return prompts[image_index]
+
+    for p in prompts:
+        if str(p.get("name", "")) == image_stem:
+            return p
+
+    raise IndexError(
+        f"Cannot map image '{grid_image_name}' to prompt. "
+        "Provide one shared prompt, numeric-indexed prompts, or prompts with matching 'name'."
+    )
+
+
+def get_prompt_fields(prompt_info):
+    view = prompt_info.get("view", "unspecified")
+    description = prompt_info.get("prompt", "")
+    robotic_manipulator = prompt_info.get("robotic manipulator", "robotic manipulator")
+    manipulated_object = prompt_info.get("manipulated object", "manipulated object")
+    return view, description, robotic_manipulator, manipulated_object
+
+
+def list_grid_images(image_grid_path):
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    return sorted(
+        [f for f in os.listdir(image_grid_path)
+         if os.path.isfile(os.path.join(image_grid_path, f))
+         and os.path.splitext(f.lower())[1] in image_exts]
+    )
+
 def process_single_image_gpt(args_tuple):
     grid_image_name, prompts, image_grid_path, api_key = args_tuple
-    client = OpenAI(api_key=api_key)
+    client, real_model_name = create_llm_client("gpt", api_key)
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        prompt_info = resolve_prompt_info(prompts, grid_image_name)
+        view, description, robotic_manipulator, manipulated_object = get_prompt_fields(prompt_info)
         image_path = os.path.join(image_grid_path, grid_image_name)
         img_base64 = encode_image(image_path)
 
         
-        Q_chain = create_question_chain(prompt_info["prompt"])
+        Q_chain = create_question_chain(description)
 
         response_chain = client.chat.completions.create(
-            model="gpt-5-2025-08-07",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -315,15 +427,15 @@ def process_single_image_gpt(args_tuple):
         ).choices[0].message.content.strip()
         
         Q = create_prompt(
-                          prompt_info["view"], 
-                          prompt_info["prompt"],
+                          view,
+                          description,
                           response_chain,
-                          prompt_info["robotic manipulator"],
-                          prompt_info["manipulated object"]
+                          robotic_manipulator,
+                          manipulated_object
                           )
 
         response = client.chat.completions.create(
-            model="gpt-5-2025-08-07",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -342,8 +454,8 @@ def process_single_image_gpt(args_tuple):
             print("Wrong response format!")
 
         return {
-            'name': prompt_info["name"],
-            'prompt': prompt_info["prompt"],
+            'name': os.path.splitext(grid_image_name)[0],
+            'prompt': description,
             'response': cleaned_output
         }
     except Exception as e:
@@ -351,14 +463,13 @@ def process_single_image_gpt(args_tuple):
                 'response': {'score': -1, 'reason': f'Error: {e}'}}
 
 def run_gpt():
-    with open(args.read_prompt_file, 'r') as f:
-        prompts = json.load(f)
+    prompts = load_prompts(args.read_prompt_file)
 
     image_grid_path = args.image_grid_path
     if image_grid_path is None or not os.path.exists(image_grid_path) or not os.listdir(image_grid_path):
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
+    grid_images = list_grid_images(image_grid_path)
 
     task_args = [(img, prompts, image_grid_path, args.api_key) for img in grid_images]
     with Pool(args.num_workers) as pool:
@@ -370,18 +481,18 @@ def run_gpt():
 
 def process_single_image_qwen(args_tuple):
     grid_image_name, prompts, image_grid_path, api_key = args_tuple
-    client = OpenAI(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", api_key=api_key)
+    client, real_model_name = create_llm_client("qwen", api_key)
     try:
-        image_index = int(grid_image_name[0:4]) - 1
-        prompt_info = prompts[image_index]
+        prompt_info = resolve_prompt_info(prompts, grid_image_name)
+        view, description, robotic_manipulator, manipulated_object = get_prompt_fields(prompt_info)
         image_path = os.path.join(image_grid_path, grid_image_name)
         img_base64 = encode_image(image_path)
 
         
-        Q_chain = create_question_chain(prompt_info["prompt"])
+        Q_chain = create_question_chain(description)
 
         response_chain = client.chat.completions.create(
-            model="qwen3-vl-235b-a22b-instruct",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -393,15 +504,15 @@ def process_single_image_qwen(args_tuple):
         ).choices[0].message.content.strip()
         
         Q = create_prompt(
-                          prompt_info["view"], 
-                          prompt_info["prompt"],
+                          view,
+                          description,
                           response_chain,
-                          prompt_info["robotic manipulator"],
-                          prompt_info["manipulated object"]
+                          robotic_manipulator,
+                          manipulated_object
                           )
 
         response = client.chat.completions.create(
-            model="qwen3-vl-235b-a22b-instruct",
+            model=real_model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -420,8 +531,8 @@ def process_single_image_qwen(args_tuple):
             print("Wrong response format!")
         
         return {
-            'name': prompt_info["name"],
-            'prompt': prompt_info["prompt"],
+            'name': os.path.splitext(grid_image_name)[0],
+            'prompt': description,
             'response': cleaned_output
         }
     except Exception as e:
@@ -429,14 +540,13 @@ def process_single_image_qwen(args_tuple):
                 'response': {'score': -1, 'reason': f'Error: {e}'}}
 
 def run_qwen():
-    with open(args.read_prompt_file, 'r') as f:
-        prompts = json.load(f)
+    prompts = load_prompts(args.read_prompt_file)
 
     image_grid_path = args.image_grid_path
     if image_grid_path is None or not os.path.exists(image_grid_path) or not os.listdir(image_grid_path):
         video_preprocess = Video_preprocess()
         image_grid_path = video_preprocess.convert_video_to_grid(args.video_path)
-    grid_images = sorted([f for f in os.listdir(image_grid_path) if f[0].isdigit()])
+    grid_images = list_grid_images(image_grid_path)
 
     task_args = [(img, prompts, image_grid_path, args.api_key) for img in grid_images]
     with Pool(args.num_workers) as pool:
@@ -448,6 +558,7 @@ def run_qwen():
 
 # =================== 启动入口 ===================
 if __name__ == "__main__":
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--video_path", required=True, type=str)
     parser.add_argument("--image_grid_path", type=str)

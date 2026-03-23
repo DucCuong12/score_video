@@ -1,0 +1,25 @@
+[
+  {
+    "name": "shared_prompt",
+    "view": "head",
+    "robotic manipulator": "robotic hand",
+    "manipulated object": "bottle, apple",
+    "prompt": "Use the visible hand to pick up the bottle, apple and place it into the box",
+    "event_list": [
+      "robot approaches the bottle",
+      "robot grasps the bottle",
+      "robot moves bottle to the box",
+      "robot releases the bottle into the box",
+      "robot approaches the apple",
+      "robot grasps the apple",
+      "robot moves apple to the box",
+      "robot releases the apple into the box"
+    ],
+    "Spatial Relationship": "inside",
+    "object1": "bottle",
+    "object2": "apple",
+    "object3": "box",
+    "entity1": "robotic hand",
+    "entity2": "box"
+  }
+]

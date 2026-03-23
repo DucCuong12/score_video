@@ -1,0 +1,7 @@
+task,num_samples,mean_score_raw,mean_score_norm_0_1
+common_manipulation,9,4.0222,0.7556
+long-horizon_planning,9,4.1111,0.7778
+multi-entity_collaboration,9,4.3222,0.8306
+spatial_relationship,9,5.0,1.0
+visual_reasoning,9,4.0,0.75
+ALL_TASKS_FINAL,45,4.2911,0.8228
